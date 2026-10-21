@@ -9,6 +9,8 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@aws-sdk/client-lex-runtime-v2": "^3.1155.0",
+    "lucide-react": "^1.61.0",
     "next": "16.4.2",
     "react": "19.3.0",
     "react-dom": "19.3.0"
