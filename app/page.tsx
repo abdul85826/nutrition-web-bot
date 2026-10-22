@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import Image from "next/image";
 import { Send, Activity, Sparkles, Flame, Heart, QrCode, X, RefreshCw, ChevronRight } from "lucide-react";
 
 interface Message {
@@ -19,15 +20,11 @@ export default function NutritionApp() {
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [sessionId, setSessionId] = useState("");
+  const [sessionId, setSessionId] = useState(() => "sess-" + Math.random().toString(36).substring(2, 9));
   const [showQrModal, setShowQrModal] = useState(false);
   const [copied, setCopied] = useState(false);
   const [started, setStarted] = useState(false);
   const chatBottomRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    setSessionId("sess-" + Math.random().toString(36).substring(2, 9));
-  }, []);
 
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -247,45 +244,28 @@ export default function NutritionApp() {
               </p>
 
               <div className="flex flex-col items-center mb-3">
-                <div className="bg-white p-3 rounded-2xl inline-block shadow-inner">
-                  <img
-                    src="https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=upi://pay?pa=syedabdulrehman01@axl%26pn=SyedAbdulRehman%26cu=INR"
-                    alt="UPI Support QR"
-                    className="w-44 h-44 object-contain mx-auto"
+                <div className="bg-white p-2.5 rounded-2xl inline-block shadow-inner">
+                  <Image
+                    src="/qr.jpeg"
+                    alt="PhonePe UPI QR - Syed Abdul Rehman"
+                    width={220}
+                    height={380}
+                    className="w-48 h-auto max-h-72 object-contain mx-auto rounded-xl"
+                    priority
                   />
                 </div>
 
                 {/* Download QR Button */}
-                <button
-                  type="button"
-                  onClick={async () => {
-                    try {
-                      const res = await fetch(
-                        "https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=upi://pay?pa=syedabdulrehman01@axl%26pn=SyedAbdulRehman%26cu=INR"
-                      );
-                      const blob = await res.blob();
-                      const url = window.URL.createObjectURL(blob);
-                      const a = document.createElement("a");
-                      a.href = url;
-                      a.download = "NutrientEarth-UPI-QR.png";
-                      document.body.appendChild(a);
-                      a.click();
-                      document.body.removeChild(a);
-                      window.URL.revokeObjectURL(url);
-                    } catch {
-                      window.open(
-                        "https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=upi://pay?pa=syedabdulrehman01@axl%26pn=SyedAbdulRehman%26cu=INR",
-                        "_blank"
-                      );
-                    }
-                  }}
+                <a
+                  href="/qr.jpeg"
+                  download="NutrientEarth-PhonePe-QR.jpeg"
                   className="mt-2.5 inline-flex items-center gap-1.5 text-xs font-medium text-zinc-300 hover:text-white bg-zinc-800/80 hover:bg-zinc-700/80 px-3 py-1.5 rounded-lg border border-zinc-700 transition"
                 >
                   <svg className="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                   </svg>
                   Download QR
-                </button>
+                </a>
               </div>
 
               {/* UPI ID Bar with Copy Button */}
