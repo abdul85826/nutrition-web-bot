@@ -35,6 +35,28 @@ const ratelimit = redis
 // Constant constraints
 const HARD_CEILING = 9500;
 const TTL_SECONDS = 35 * 24 * 60 * 60; // 35 days TTL
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const RATE_LIMIT_MAX_REQUESTS = 5;
+
+// Fallback security guards when managed Redis is not configured
+const inMemoryIpWindows = new Map<string, number[]>();
+const inMemoryMonthlyUsage = new Map<string, number>();
+const inMemoryAlertSent = new Set<string>();
+
+function isRateLimitedInMemory(ip: string) {
+  const now = Date.now();
+  const windowStart = now - RATE_LIMIT_WINDOW_MS;
+  const currentWindow = inMemoryIpWindows.get(ip)?.filter((timestamp) => timestamp > windowStart) ?? [];
+
+  if (currentWindow.length >= RATE_LIMIT_MAX_REQUESTS) {
+    inMemoryIpWindows.set(ip, currentWindow);
+    return true;
+  }
+
+  currentWindow.push(now);
+  inMemoryIpWindows.set(ip, currentWindow);
+  return false;
+}
 
 /**
  * Asynchronous Alerting System
@@ -99,18 +121,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Gracefully verify Redis availability to prevent silent failures or unmetered AWS calls
-  if (!redis || !ratelimit) {
-    console.error("Upstash Redis is not properly configured. Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN.");
-    return NextResponse.json(
-      {
-        reply: "Service temporarily unavailable. Security layer is initializing. Please try again shortly.",
-        error: "Redis credentials not configured",
-      },
-      { status: 503 }
-    );
-  }
-
   // Extract client IP address
   const ip =
     req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
@@ -127,8 +137,11 @@ export async function POST(req: NextRequest) {
     // =======================================================================
     // DEFENSIVE TIER 2: Per-IP Sliding Window Rate Limiting (5 req / 60s)
     // =======================================================================
-    const rateLimitResult = await ratelimit.limit(ip);
-    if (!rateLimitResult.success) {
+    const isRateLimited = ratelimit
+      ? !(await ratelimit.limit(ip)).success
+      : isRateLimitedInMemory(ip);
+
+    if (isRateLimited) {
       return NextResponse.json(
         {
           reply: "Rate limit exceeded. Please wait a moment before sending more messages.",
@@ -141,8 +154,9 @@ export async function POST(req: NextRequest) {
     // =======================================================================
     // DEFENSIVE TIER 3: Zero-Cost Monthly Circuit Breaker (AWS Lex Hard Ceiling)
     // =======================================================================
-    const currentUsageRaw = await redis.get<number | string>(monthlyKey);
-    const currentUsage = Number(currentUsageRaw) || 0;
+    const currentUsage = redis
+      ? Number((await redis.get<number | string>(monthlyKey)) || 0)
+      : inMemoryMonthlyUsage.get(monthlyKey) || 0;
 
     if (currentUsage >= HARD_CEILING) {
       // Trigger asynchronous admin warning email (non-blocking)
@@ -150,19 +164,31 @@ export async function POST(req: NextRequest) {
       const alertMessage = "ALERT: Nutrient Earth monthly free-tier limit reached (9,500/10,000). System has safely locked AWS requests to prevent any billing.";
 
       const alertKey = `lex_alert_sent:${year}-${month}`;
-      redis.get(alertKey).then((alreadySent) => {
-        if (!alreadySent) {
-          redis.set(alertKey, "1", { ex: TTL_SECONDS }).catch(console.error);
-          sendSecurityOrBudgetEmail(alertSubject, {
-            message: alertMessage,
-            currentUsage,
-            hardCeiling: HARD_CEILING,
-            freeTierTotal: 10000,
-            month: `${year}-${month}`,
-            timestamp: new Date().toISOString(),
-          }).catch((emailErr) => console.error("Async email dispatch error:", emailErr));
-        }
-      }).catch(console.error);
+      if (redis) {
+        redis.get(alertKey).then((alreadySent) => {
+          if (!alreadySent) {
+            redis.set(alertKey, "1", { ex: TTL_SECONDS }).catch(console.error);
+            sendSecurityOrBudgetEmail(alertSubject, {
+              message: alertMessage,
+              currentUsage,
+              hardCeiling: HARD_CEILING,
+              freeTierTotal: 10000,
+              month: `${year}-${month}`,
+              timestamp: new Date().toISOString(),
+            }).catch((emailErr) => console.error("Async email dispatch error:", emailErr));
+          }
+        }).catch(console.error);
+      } else if (!inMemoryAlertSent.has(alertKey)) {
+        inMemoryAlertSent.add(alertKey);
+        sendSecurityOrBudgetEmail(alertSubject, {
+          message: alertMessage,
+          currentUsage,
+          hardCeiling: HARD_CEILING,
+          freeTierTotal: 10000,
+          month: `${year}-${month}`,
+          timestamp: new Date().toISOString(),
+        }).catch((emailErr) => console.error("Async email dispatch error:", emailErr));
+      }
 
       return NextResponse.json(
         {
@@ -189,14 +215,18 @@ export async function POST(req: NextRequest) {
     // =======================================================================
     // POST-EXECUTION: Increment Monthly Usage Counter & Ensure 35-Day TTL
     // =======================================================================
-    const newCount = await redis.incr(monthlyKey);
-    if (newCount === 1) {
-      await redis.expire(monthlyKey, TTL_SECONDS);
-    } else {
-      const ttl = await redis.ttl(monthlyKey);
-      if (ttl < 0) {
+    if (redis) {
+      const newCount = await redis.incr(monthlyKey);
+      if (newCount === 1) {
         await redis.expire(monthlyKey, TTL_SECONDS);
+      } else {
+        const ttl = await redis.ttl(monthlyKey);
+        if (ttl < 0) {
+          await redis.expire(monthlyKey, TTL_SECONDS);
+        }
       }
+    } else {
+      inMemoryMonthlyUsage.set(monthlyKey, currentUsage + 1);
     }
 
     return NextResponse.json({
