@@ -10,6 +10,10 @@ interface Message {
   text: string;
 }
 
+function createSessionId() {
+  return "sess-" + Date.now().toString(36);
+}
+
 export default function NutritionApp() {
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -20,7 +24,7 @@ export default function NutritionApp() {
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [sessionId, setSessionId] = useState(() => "sess-" + Math.random().toString(36).substring(2, 9));
+  const [sessionId, setSessionId] = useState("sess-initial");
   const [showQrModal, setShowQrModal] = useState(false);
   const [copied, setCopied] = useState(false);
   const [started, setStarted] = useState(false);
@@ -33,6 +37,10 @@ export default function NutritionApp() {
   const handleSend = async (directText?: string) => {
     const textToSend = directText || input;
     if (!textToSend.trim() || loading) return;
+    const activeSessionId = sessionId === "sess-initial" ? createSessionId() : sessionId;
+    if (sessionId !== activeSessionId) {
+      setSessionId(activeSessionId);
+    }
 
     setInput("");
     setStarted(true);
@@ -43,7 +51,7 @@ export default function NutritionApp() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: textToSend, sessionId }),
+        body: JSON.stringify({ text: textToSend, sessionId: activeSessionId }),
       });
       const data = (await res.json().catch(() => null)) as { reply?: unknown } | null;
       const replyText =
@@ -67,7 +75,7 @@ export default function NutritionApp() {
   };
 
   const resetSession = () => {
-    setSessionId("sess-" + Math.random().toString(36).substring(2, 9));
+    setSessionId(createSessionId());
     setStarted(false);
     setMessages([
       {
