@@ -111,7 +111,7 @@ export default function NutritionApp() {
           </div>
         </header>
 
-        {/* Dedicated 1-Click Launch Action */}
+        {/* Dedicated 1-Click Trigger */}
         {!started && (
           <div className="p-4 bg-emerald-950/20 border-b border-emerald-500/20 flex flex-col items-center text-center space-y-2.5">
             <span className="text-xs text-emerald-300 font-medium">Ready to get your macro & caloric targets?</span>
@@ -126,7 +126,7 @@ export default function NutritionApp() {
           </div>
         )}
 
-        {/* Chat History */}
+        {/* Chat Stream */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
           {messages.map((m) => (
             <div key={m.id} className={`flex ${m.sender === "user" ? "justify-end" : "justify-start"}`}>
@@ -226,7 +226,7 @@ export default function NutritionApp() {
           </button>
         </form>
 
-        {/* UPI / QR Support Modal */}
+        {/* Dynamic Scannable UPI / QR Modal */}
         {showQrModal && (
           <div className="absolute inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
             <div className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 max-w-sm w-full text-center relative shadow-2xl">
@@ -247,14 +247,15 @@ export default function NutritionApp() {
 
               <div className="bg-white p-3 rounded-2xl inline-block shadow-inner mb-3">
                 <img
-                  src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=upi://pay?pa=abdul85827@okhdfcbank&pn=SyedAbdulRehman&cu=INR"
+                  src="https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=upi://pay?pa=syedabdulrehman01@axl%26pn=SyedAbdulRehman%26cu=INR"
                   alt="UPI Support QR"
-                  className="w-40 h-40 object-contain mx-auto"
+                  className="w-44 h-44 object-contain mx-auto"
                 />
               </div>
 
-              <div className="text-xs text-zinc-300 font-mono bg-zinc-950 py-2 px-3 rounded-xl border border-zinc-800">
-                abdul85827@okhdfcbank
+              <div className="text-xs text-zinc-300 font-mono bg-zinc-950 py-2.5 px-3 rounded-xl border border-zinc-800 flex items-center justify-between">
+                <span>syedabdulrehman01@axl</span>
+                <span className="text-[10px] text-emerald-400 uppercase font-semibold">UPI ID</span>
               </div>
 
               <button
