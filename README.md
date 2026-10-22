@@ -16,6 +16,19 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
+## AWS usage protection
+
+Normal visitors are not subject to a product rate limit. The chat only blocks
+automated or clearly abusive traffic (for example, bot user agents, injection
+payloads, or a very large burst of requests).
+
+When AWS Lex is configured, the API counts Lex requests for the current UTC
+month. Set `LEX_MONTHLY_REQUEST_LIMIT` in the environment to a value below the
+available AWS/Lambda budget. Once the limit is reached, AWS calls pause and
+the API returns a friendly capacity message. If SMTP settings are configured,
+the first limit breach each month sends an alert to `ADMIN_RECEIVER_EMAIL`.
+Requests served by the local nutrition fallback do not consume AWS credits.
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.

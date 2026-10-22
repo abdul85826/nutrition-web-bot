@@ -139,7 +139,7 @@ export default function NutritionApp() {
           const errorMessage =
             data?.reply ||
             (res.status === 429
-              ? "Rate limit exceeded. Please wait a moment before sending more messages."
+              ? "This request looks automated or unsafe. Please use the chat normally and try again."
               : res.status === 503
               ? "Service initializing or temporarily unavailable. Please try again shortly."
               : "Unable to process calculation. Please try again.");
@@ -460,4 +460,4 @@ export default function NutritionApp() {
       </div>
     </main>
   );
-}
+}

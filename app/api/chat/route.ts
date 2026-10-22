@@ -1,7 +1,6 @@
 import { LexRuntimeV2Client, RecognizeTextCommand } from "@aws-sdk/client-lex-runtime-v2";
 import { NextRequest, NextResponse } from "next/server";
 import { Redis } from "@upstash/redis";
-import { Ratelimit } from "@upstash/ratelimit";
 import nodemailer from "nodemailer";
 
 // ============================================================================
@@ -44,72 +43,94 @@ const redis = isRedisConfigured
     })
   : null;
 
-// Multi-Tier Rate Limiter via Upstash Redis
-const ratelimit = redis
-  ? new Ratelimit({
-      redis,
-      limiter: Ratelimit.slidingWindow(5, "60 s"),
-      analytics: true,
-      prefix: "ratelimit_chat",
-    })
-  : null;
-
 // ============================================================================
-// IN-MEMORY RESILIENT SECURITY LAYER (Fallback when Redis is unconfigured)
+// ABUSE PROTECTION (Normal users are not request-rate limited)
 // ============================================================================
 
-interface RateLimitRecord {
+interface AbuseRecord {
   timestamps: number[];
 }
 
-const inMemoryRateLimits = new Map<string, RateLimitRecord>();
+const inMemoryAbuseRecords = new Map<string, AbuseRecord>();
 const inMemoryMonthlyUsage = new Map<string, number>();
+const inMemoryAlertKeys = new Set<string>();
 
-// Clean up expired rate-limit IP records every 5 minutes
+// Keep the in-memory fallback bounded when Redis is not configured.
 if (typeof setInterval !== "undefined") {
   const cleanupTimer = setInterval(() => {
     const now = Date.now();
-    for (const [ip, record] of inMemoryRateLimits.entries()) {
+    for (const [ip, record] of inMemoryAbuseRecords.entries()) {
       record.timestamps = record.timestamps.filter((ts) => now - ts < 60000);
       if (record.timestamps.length === 0) {
-        inMemoryRateLimits.delete(ip);
+        inMemoryAbuseRecords.delete(ip);
       }
     }
   }, 5 * 60 * 1000);
   if (cleanupTimer.unref) cleanupTimer.unref();
 }
 
-function checkInMemoryRateLimit(clientIp: string): {
-  success: boolean;
-  limit: number;
-  remaining: number;
-  reset: number;
-} {
-  const now = Date.now();
-  const windowMs = 60 * 1000;
-  const limit = 5;
+const ABUSE_BURST_LIMIT = 40;
+const ABUSE_BURST_WINDOW_SECONDS = 10;
+const ABUSE_MINUTE_LIMIT = 180;
+const ABUSE_MINUTE_WINDOW_SECONDS = 60;
 
-  let record = inMemoryRateLimits.get(clientIp);
+const BOT_USER_AGENT_PATTERN =
+  /bot|crawler|spider|scraper|headless|phantom|selenium|playwright|puppeteer|curl|wget|python-requests/i;
+const SUSPICIOUS_INPUT_PATTERN =
+  /<script|javascript:|onerror\s*=|union\s+select|drop\s+table|\/etc\/passwd|\.{2}[\\/]/i;
+
+async function checkAbuse(
+  clientIp: string,
+  userAgent: string,
+  text: string
+): Promise<{ blocked: boolean; reason?: string }> {
+  const botUserAgent = BOT_USER_AGENT_PATTERN.test(userAgent);
+  const suspiciousInput = SUSPICIOUS_INPUT_PATTERN.test(text);
+
+  if (suspiciousInput) {
+    return { blocked: true, reason: "suspicious input pattern" };
+  }
+
+  if (redis) {
+    const burstKey = `abuse_burst:${clientIp}`;
+    const minuteKey = `abuse_minute:${clientIp}`;
+    const [burstCount, minuteCount] = await Promise.all([
+      redis.incr(burstKey),
+      redis.incr(minuteKey),
+    ]);
+
+    if (burstCount === 1) await redis.expire(burstKey, ABUSE_BURST_WINDOW_SECONDS);
+    if (minuteCount === 1) await redis.expire(minuteKey, ABUSE_MINUTE_WINDOW_SECONDS);
+
+    if (botUserAgent || burstCount > ABUSE_BURST_LIMIT || minuteCount > ABUSE_MINUTE_LIMIT) {
+      return {
+        blocked: true,
+        reason: botUserAgent
+          ? "automated client"
+          : `request burst (${burstCount} in the current window)`,
+      };
+    }
+    return { blocked: false };
+  }
+
+  const now = Date.now();
+  let record = inMemoryAbuseRecords.get(clientIp);
   if (!record) {
     record = { timestamps: [] };
-    inMemoryRateLimits.set(clientIp, record);
+    inMemoryAbuseRecords.set(clientIp, record);
   }
 
-  record.timestamps = record.timestamps.filter((ts) => now - ts < windowMs);
-
-  if (record.timestamps.length >= limit) {
-    const oldest = record.timestamps[0];
-    const reset = Math.ceil((oldest + windowMs) / 1000);
-    return { success: false, limit, remaining: 0, reset };
-  }
-
+  record.timestamps = record.timestamps.filter((ts) => now - ts < 60_000);
   record.timestamps.push(now);
-  return {
-    success: true,
-    limit,
-    remaining: limit - record.timestamps.length,
-    reset: Math.ceil((now + windowMs) / 1000),
-  };
+  const burstCount = record.timestamps.filter((ts) => now - ts < 10_000).length;
+
+  if (botUserAgent || burstCount > ABUSE_BURST_LIMIT || record.timestamps.length > ABUSE_MINUTE_LIMIT) {
+    return {
+      blocked: true,
+      reason: botUserAgent ? "automated client" : `request burst (${record.timestamps.length} in the current window)`,
+    };
+  }
+  return { blocked: false };
 }
 
 function incrementInMemoryMonthlyUsage(monthKey: string): number {
@@ -127,7 +148,10 @@ function decrementInMemoryMonthlyUsage(monthKey: string): void {
 }
 
 // Constant constraints
-const HARD_CEILING = 9500;
+const HARD_CEILING = Math.max(
+  1,
+  Number.parseInt(process.env.LEX_MONTHLY_REQUEST_LIMIT || "9500", 10) || 9500
+);
 const TTL_SECONDS = 35 * 24 * 60 * 60; // 35 days TTL
 const LEX_CALL_TIMEOUT_MS = 8000;
 const SAFE_SESSION_REGEX = /^[0-9a-zA-Z._:-]{2,100}$/;
@@ -436,6 +460,7 @@ export async function POST(req: NextRequest) {
 
   // Extract sanitized client IP
   const clientIp = getClientIp(req);
+  const userAgent = req.headers.get("user-agent") || "";
 
   // Compute monthly global counter key (UTC YYYY-MM)
   const now = new Date();
@@ -445,86 +470,98 @@ export async function POST(req: NextRequest) {
 
   try {
     // =======================================================================
-    // DEFENSIVE TIER 2: Rate Limiting (Redis with in-memory fallback)
+    // DEFENSIVE TIER 2: Block automated or clearly abusive traffic only.
+    // Normal users can send messages without a product-imposed rate limit.
     // =======================================================================
-    let rateLimitSuccess = true;
-    let rateLimitLimit = 5;
-    let rateLimitRemaining = 4;
-    let rateLimitReset = Math.ceil(Date.now() / 1000) + 60;
+    const abuseResult = await checkAbuse(clientIp, userAgent, sanitizedText);
+    if (abuseResult.blocked) {
+      const abuseAlertKey = `abuse_alert_sent:${year}-${month}:${clientIp}`;
+      const shouldAlert = redis
+        ? await redis.set(abuseAlertKey, "1", { nx: true, ex: TTL_SECONDS })
+        : true;
 
-    if (ratelimit) {
-      const rlResult = await ratelimit.limit(clientIp);
-      rateLimitSuccess = rlResult.success;
-      rateLimitLimit = rlResult.limit;
-      rateLimitRemaining = rlResult.remaining;
-      rateLimitReset = rlResult.reset;
-    } else {
-      const localRl = checkInMemoryRateLimit(clientIp);
-      rateLimitSuccess = localRl.success;
-      rateLimitLimit = localRl.limit;
-      rateLimitRemaining = localRl.remaining;
-      rateLimitReset = localRl.reset;
-    }
+      if (shouldAlert) {
+        sendSecurityOrBudgetEmail(
+          "ALERT: Nutrient Earth blocked automated or abusive traffic",
+          {
+            message: "A request was blocked by abuse protection. Normal users are not rate limited.",
+            reason: abuseResult.reason,
+            ip: clientIp,
+            userAgent: userAgent.slice(0, 200),
+            month: `${year}-${month}`,
+            timestamp: new Date().toISOString(),
+          }
+        ).catch((emailErr) => console.error("Async abuse alert error:", emailErr));
+      }
 
-    if (!rateLimitSuccess) {
       return NextResponse.json(
         {
-          reply: "Rate limit exceeded. Please wait a moment before sending more messages.",
-          error: "Too Many Requests",
+          reply: "This request looks automated or unsafe. Please use the chat normally and try again.",
+          error: "Automated or abusive request blocked",
         },
         {
           status: 429,
-          headers: {
-            "Retry-After": "60",
-            "X-RateLimit-Limit": rateLimitLimit.toString(),
-            "X-RateLimit-Remaining": rateLimitRemaining.toString(),
-            "X-RateLimit-Reset": rateLimitReset.toString(),
-          },
         }
       );
     }
 
     // =======================================================================
-    // DEFENSIVE TIER 3: Atomic Zero-Cost Monthly Circuit Breaker
+    // DEFENSIVE TIER 3: Atomic AWS Lex monthly circuit breaker.
+    // Local fallback requests do not consume Lex/Lambda credits.
     // =======================================================================
     let newCount = 0;
-    if (redis) {
-      newCount = await redis.incr(monthlyKey);
-      if (newCount === 1) {
-        await redis.expire(monthlyKey, TTL_SECONDS);
-      }
-    } else {
-      newCount = incrementInMemoryMonthlyUsage(monthlyKey);
-    }
-
-    if (newCount > HARD_CEILING) {
+    if (lexClient) {
       if (redis) {
-        await redis.decr(monthlyKey).catch(() => {});
-        const alertKey = `lex_alert_sent:${year}-${month}`;
-        const alertAcquired = await redis.set(alertKey, "1", { nx: true, ex: TTL_SECONDS });
-        if (alertAcquired) {
-          sendSecurityOrBudgetEmail(
-            "ALERT: Nutrient Earth monthly free-tier limit reached (9,500/10,000)",
-            {
-              message: "Nutrient Earth monthly limit reached. System locked AWS requests to prevent billing.",
-              currentUsage: newCount,
-              hardCeiling: HARD_CEILING,
-              freeTierTotal: 10000,
-              month: `${year}-${month}`,
-              timestamp: new Date().toISOString(),
-            }
-          ).catch((emailErr) => console.error("Async budget alert error:", emailErr));
+        newCount = await redis.incr(monthlyKey);
+        if (newCount === 1) {
+          await redis.expire(monthlyKey, TTL_SECONDS);
         }
       } else {
-        decrementInMemoryMonthlyUsage(monthlyKey);
+        newCount = incrementInMemoryMonthlyUsage(monthlyKey);
       }
 
-      return NextResponse.json(
-        {
-          reply: "Nutrient Earth has reached its free community computation capacity for this month. The calculation engine will automatically reopen on the 1st of next month at 00:00 UTC. Thank you for your support!",
-        },
-        { status: 200 }
-      );
+      if (newCount > HARD_CEILING) {
+        if (redis) {
+          await redis.decr(monthlyKey).catch(() => {});
+          const alertKey = `lex_alert_sent:${year}-${month}`;
+          const alertAcquired = await redis.set(alertKey, "1", { nx: true, ex: TTL_SECONDS });
+          if (alertAcquired) {
+            sendSecurityOrBudgetEmail(
+              "ALERT: Nutrient Earth monthly AWS Lex limit reached",
+              {
+                message: "The configured AWS Lex request limit was reached. AWS requests are locked to prevent unexpected billing.",
+                currentUsage: newCount,
+                hardCeiling: HARD_CEILING,
+                month: `${year}-${month}`,
+                timestamp: new Date().toISOString(),
+              }
+            ).catch((emailErr) => console.error("Async budget alert error:", emailErr));
+          }
+        } else {
+          decrementInMemoryMonthlyUsage(monthlyKey);
+          const alertKey = `lex_alert_sent:${year}-${month}`;
+          if (!inMemoryAlertKeys.has(alertKey)) {
+            inMemoryAlertKeys.add(alertKey);
+            sendSecurityOrBudgetEmail(
+              "ALERT: Nutrient Earth monthly AWS Lex limit reached",
+              {
+                message: "The configured AWS Lex request limit was reached. AWS requests are locked to prevent unexpected billing.",
+                currentUsage: newCount,
+                hardCeiling: HARD_CEILING,
+                month: `${year}-${month}`,
+                timestamp: new Date().toISOString(),
+              }
+            ).catch((emailErr) => console.error("Async budget alert error:", emailErr));
+          }
+        }
+
+        return NextResponse.json(
+          {
+            reply: "The nutrition service has reached its monthly capacity. Please use the service again after the monthly reset.",
+          },
+          { status: 200 }
+        );
+      }
     }
 
     // =======================================================================
@@ -566,10 +603,12 @@ export async function POST(req: NextRequest) {
   } catch (error: unknown) {
     console.error("Lex or Security Runtime Error:", error);
 
-    if (redis) {
-      await redis.decr(monthlyKey).catch(() => {});
-    } else {
-      decrementInMemoryMonthlyUsage(monthlyKey);
+    if (lexClient) {
+      if (redis) {
+        await redis.decr(monthlyKey).catch(() => {});
+      } else {
+        decrementInMemoryMonthlyUsage(monthlyKey);
+      }
     }
 
     const err = error as { name?: string; message?: string } | undefined;
@@ -601,4 +640,4 @@ export async function POST(req: NextRequest) {
       );
     }
   }
-}
+}
