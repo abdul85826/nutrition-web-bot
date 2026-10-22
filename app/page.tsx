@@ -45,10 +45,16 @@ export default function NutritionApp() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: textToSend, sessionId }),
       });
-      const data = await res.json();
+      const data = (await res.json().catch(() => null)) as { reply?: unknown } | null;
+      const replyText =
+        typeof data?.reply === "string"
+          ? data.reply
+          : res.ok
+            ? "Calculation complete."
+            : "Service is temporarily unavailable. Please try again.";
       setMessages((prev) => [
         ...prev,
-        { id: Math.random().toString(), sender: "bot", text: data.reply || "Calculation complete." },
+        { id: Math.random().toString(), sender: "bot", text: replyText },
       ]);
     } catch {
       setMessages((prev) => [
