@@ -10,14 +10,18 @@
   },
   "dependencies": {
     "@aws-sdk/client-lex-runtime-v2": "^3.1155.0",
+    "@upstash/ratelimit": "^2.2.0",
+    "@upstash/redis": "^1.39.0",
     "lucide-react": "^1.61.0",
     "next": "16.4.2",
+    "nodemailer": "^10.2.0",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
     "@types/node": "^20",
+    "@types/nodemailer": "^8.0.2",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
