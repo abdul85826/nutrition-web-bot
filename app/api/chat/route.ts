@@ -243,6 +243,8 @@ interface SessionProfile {
   heightCm?: number;
   activity?: "sedentary" | "light" | "moderate" | "active" | "very_active";
   goal?: "fat loss" | "maintenance" | "muscle gain";
+  foodItem?: string;
+  dietaryNotes?: string;
 }
 
 const sessionStore = new Map<string, SessionProfile>();
@@ -269,6 +271,17 @@ function processLocalNutritionEngine(input: string, sessionId: string): string {
     profile.goal = "muscle gain";
   } else if (/maintain|maintenance|recomp/i.test(lower)) {
     profile.goal = "maintenance";
+  }
+
+  const foodMatch = lower.match(
+    /(?:try|eat|have|include|consume|is)\s+(?:a\s+)?(.+?)(?:\s+(?:healthy|good|okay|ok|suitable|for me))?[?.!]*$/i
+  );
+  const foodIntent = /\b(try|eat|have|include|consume|food|meal|drink|snack|suitable)\b/i.test(lower);
+  if (foodIntent && foodMatch?.[1] && !/\b(?:male|female|years?|kg|cm|sedentary|moderate|maintenance|muscle gain|fat loss)\b/i.test(foodMatch[1])) {
+    profile.foodItem = foodMatch[1].trim().replace(/^(is|can i)\s+/i, "");
+  }
+  if (/\b(allerg(?:y|ies)|diabet(?:es|ic)|blood pressure|pregnan|gluten|vegan|vegetarian|condition)\b/i.test(lower)) {
+    profile.dietaryNotes = input.trim();
   }
 
   // 3. Detect Activity
@@ -307,6 +320,29 @@ function processLocalNutritionEngine(input: string, sessionId: string): string {
   // If user simply clicks "Calculate my nutrition plan" or starts fresh
   if (/calculate|start|hello|hi|hey/i.test(lower) && !profile.gender) {
     return "Welcome to the Nutrient Earth Mifflin-St Jeor metabolic calculation engine!\n\nTo calculate your targets, please share your details (or tap the quick buttons below):\n• Gender (Male / Female)\n• Age (years)\n• Weight (kg)\n• Height (cm)\n• Activity Level (Sedentary, Light, Moderate)\n• Goal (Fat Loss, Maintenance, Muscle Gain)";
+  }
+
+  if (profile.foodItem) {
+    if (!profile.age || !profile.goal) {
+      const missingFoodContext = [
+        !profile.age ? "your age" : "",
+        !profile.goal ? "your goal (fat loss, maintenance, or muscle gain)" : "",
+      ].filter(Boolean);
+      return `I can screen **${profile.foodItem}** for your context. I only need ${missingFoodContext.join(" and ")}. You can answer in one line, like “29, fat loss”.`;
+    }
+
+    const item = profile.foodItem;
+    const caution =
+      /\b(energy drink|soda|soft drink|alcohol|deep fried|fried chicken|chips|candy|cake)\b/i.test(item)
+        ? "Keep it occasional: this is usually high in added sugar, alcohol, or energy density."
+        : /\b(nut|peanut|shellfish|milk|dairy|wheat|gluten)\b/i.test(item) && profile.dietaryNotes
+        ? "Pause here if your note indicates an allergy or intolerance. Choose a verified safe alternative."
+        : "It can fit for most healthy adults when the portion and ingredients match your plan.";
+    const portion = /\b(protein|chicken|fish|egg|yogurt|lentil|bean|tofu)\b/i.test(item)
+      ? "Aim for a simple serving with a protein or fibre-rich meal."
+      : "Start with a small serving, check the label, and notice how you feel.";
+
+    return `**${item} — personal fit check**\n\n**Verdict:** ${caution}\n\n**For your ${profile.goal} goal:** ${portion}\n\nThis is general education, not medical advice. If you have a diagnosed condition, take medication, or have an allergy, confirm the choice with a qualified clinician.`;
   }
 
   // Check what is missing
